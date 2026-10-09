@@ -48,7 +48,7 @@ if uploaded_file is not None:
     else:
         # Inicjalizacja AI
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-flash') 
+        model = genai.GenerativeModel('gemini-1.5-pro') 
         
         image = Image.open(uploaded_file)
         
