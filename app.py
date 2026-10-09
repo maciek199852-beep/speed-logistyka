@@ -10,7 +10,7 @@ import json
 # ==========================================
 st.set_page_config(page_title="Speed - Panel Logistyki", page_icon="🚛", layout="wide")
 st.markdown('<p style="font-size: 2.5rem; color: #1E3A8A; font-weight: 700; text-align: center;">🚛 System Analizy Logistycznej "Speed"</p>', unsafe_allow_html=True)
-st.markdown('<p style="font-size: 1.2rem; color: #64748B; text-align: center; margin-bottom: 30px;">Pełna automatyzacja: AI (Odczyt) + Google Maps (Precyzyjny Dystans)</p>', unsafe_allow_html=True)
+st.markdown('<p style="font-size: 1.2rem; color: #64748B; text-align: center; margin-bottom: 30px;">Pełna automatyzacja: AI + Google Maps (Tryb Diagnostyczny)</p>', unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
@@ -20,7 +20,6 @@ with st.sidebar:
     st.header("⚙️ Konfiguracja Systemu")
     api_key_gemini = st.text_input("🔑 Klucz API Gemini (AI)", type="password")
     
-    # Dynamiczne modele AI
     dostepne_modele = []
     if api_key_gemini:
         try:
@@ -32,20 +31,18 @@ with st.sidebar:
     wybrany_model = st.selectbox("🤖 Wybierz model do analizy", dostepne_modele) if dostepne_modele else None
     
     st.markdown("---")
-    api_key_maps = st.text_input("📍 Klucz API Google Maps", type="password", help="Wymagane do precyzyjnego liczenia kilometrów")
+    api_key_maps = st.text_input("📍 Klucz API Google Maps", type="password")
     
     st.markdown("---")
     uploaded_file = st.file_uploader("📥 Wgraj zrzut ze Speeda (JPG/PNG)", type=['png', 'jpg', 'jpeg'])
 
 # ==========================================
-# FUNKCJA GOOGLE MAPS (Z KUFSTEIN DLA IT)
+# OBLICZANIE KILOMETRÓW Z OBSŁUGĄ BŁĘDÓW
 # ==========================================
 def oblicz_realne_km(zaladunek, rozladunek, kod_kraju_rozladunku, maps_client):
     try:
-        # Sprawdzanie zasady z Konstytucji 2026 (Włochy = Kufstein)
         punkty_posrednie = ["Kufstein, Austria"] if "IT" in kod_kraju_rozladunku.upper() else None
         
-        # Zapytanie do Google Maps API
         directions = maps_client.directions(
             zaladunek,
             rozladunek,
@@ -53,12 +50,15 @@ def oblicz_realne_km(zaladunek, rozladunek, kod_kraju_rozladunku, maps_client):
         )
         
         if directions:
-            # Sumowanie dystansu wszystkich odcinków trasy
             dystans_metry = sum([leg['distance']['value'] for leg in directions[0]['legs']])
             return int(dystans_metry / 1000)
+        else:
+            st.warning(f"Mapy nie znalazły trasy dla: {zaladunek} -> {rozladunek}")
+            return 1
     except Exception as e:
-        return None
-    return None
+        # TUTAJ WYŚWIETLIMY DOKŁADNY BŁĄD OD GOOGLE MAPS
+        st.error(f"❌ Błąd klucza Google Maps: {e}")
+        return 1
 
 def calculate_metrics(df):
     df['€/km Przewoźnik'] = (df['Fracht P'] / df['KM']).round(2)
@@ -71,7 +71,7 @@ def calculate_metrics(df):
 # ==========================================
 if uploaded_file is not None:
     if not api_key_gemini or not api_key_maps or not wybrany_model:
-        st.warning("⚠️ Wprowadź OBA klucze API (Gemini oraz Google Maps) i wybierz model.")
+        st.warning("⚠️ Wprowadź OBA klucze API i wybierz model.")
     else:
         try:
             gmaps = googlemaps.Client(key=api_key_maps)
@@ -82,7 +82,6 @@ if uploaded_file is not None:
                 st.image(image, use_container_width=True)
                 
             with st.spinner(f"🤖 Krok 1/2: AI analizuje zrzut..."):
-                # Zmieniony prompt, żeby AI oddzieliło załadunek od rozładunku (potrzebne dla Map)
                 prompt = """
                 Jesteś ekspertem logistyki. Zwróć JSON (lista obiektów), bez znaczników.
                 Dla każdego zlecenia wyciągnij:
@@ -106,33 +105,28 @@ if uploaded_file is not None:
             with st.spinner(f"🗺️ Krok 2/2: Obliczanie precyzyjnych tras przez Google Maps..."):
                 gotowe_dane = []
                 for z in zlecenia:
-                    # Obliczanie KM przez Google Maps
                     km = oblicz_realne_km(z["Zaladunek"], z["Rozladunek"], z["Kraj Rozladunku"], gmaps)
-                    if km is None:
-                        km = 1 # Zabezpieczenie przed dzieleniem przez zero
                     
-                    # Budowanie nazwy trasy z Konstytucją 2026
                     dopisek = " (przez Kufstein)" if "IT" in z["Kraj Rozladunku"].upper() else ""
                     trasa = f"{z['Zaladunek']} -> {z['Rozladunek']}{dopisek}"
                     
                     gotowe_dane.append({
                         "Trasa (Kod Kraj)": trasa,
-                        "Fracht P": z["Fracht P"],
-                        "Fracht K": z["Fracht K"],
+                        "Fracht P": float(z["Fracht P"]),
+                        "Fracht K": float(z["Fracht K"]),
                         "KM": km
                     })
                     
                 df_main = pd.DataFrame(gotowe_dane)
                 df_main = calculate_metrics(df_main)
                 
-                st.success("✅ Analiza i wyznaczanie tras zakończone!")
+                st.success("✅ Zakończono!")
                 
-                st.subheader("📊 Tabela Zleceń (100% precyzyjne kilometry)")
+                st.subheader("📊 Tabela Zleceń")
                 styled_main = df_main.style.map(lambda x: 'color: #DC2626; font-weight: bold;' if x <= 0 else 'color: #059669;', subset=['Nadwyżka (P-KM)']).format("{:.2f}", subset=['Fracht P', 'Fracht K', 'Nadwyżka (P-KM)', '€/km Przewoźnik', '€/km Klient'])
                 st.dataframe(styled_main, use_container_width=True)
 
         except Exception as e:
             st.error(f"Wystąpił błąd: {e}")
-            st.info("Sprawdź, czy na pewno oba klucze API są poprawne.")
 else:
     st.info("📥 Wgraj zrzut ekranu w panelu bocznym, aby rozpocząć.")
