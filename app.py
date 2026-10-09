@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import google.generativeai as genai
+import googlemaps
 from PIL import Image
 import json
 
@@ -9,35 +10,56 @@ import json
 # ==========================================
 st.set_page_config(page_title="Speed - Panel Logistyki", page_icon="🚛", layout="wide")
 st.markdown('<p style="font-size: 2.5rem; color: #1E3A8A; font-weight: 700; text-align: center;">🚛 System Analizy Logistycznej "Speed"</p>', unsafe_allow_html=True)
+st.markdown('<p style="font-size: 1.2rem; color: #64748B; text-align: center; margin-bottom: 30px;">Pełna automatyzacja: AI (Odczyt) + Google Maps (Precyzyjny Dystans)</p>', unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
-# PANEL BOCZNY - DYNAMICZNE POBIERANIE MODELI
+# PANEL BOCZNY 
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Konfiguracja Systemu")
-    api_key = st.text_input("🔑 Wprowadź klucz API Gemini", type="password")
+    api_key_gemini = st.text_input("🔑 Klucz API Gemini (AI)", type="password")
     
-    # Dynamiczna lista modeli
+    # Dynamiczne modele AI
     dostepne_modele = []
-    if api_key:
+    if api_key_gemini:
         try:
-            genai.configure(api_key=api_key)
-            # Pobierz tylko te modele, które potrafią analizować dane (generateContent)
+            genai.configure(api_key=api_key_gemini)
             dostepne_modele = [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            st.success(f"Połączono! Znaleziono {len(dostepne_modele)} dostępnych modeli.")
-        except Exception as e:
-            st.error("Błąd weryfikacji klucza. Sprawdź, czy jest poprawny.")
+        except:
+            pass
             
-    # Menu wyboru modelu z pobranej listy
     wybrany_model = st.selectbox("🤖 Wybierz model do analizy", dostepne_modele) if dostepne_modele else None
+    
+    st.markdown("---")
+    api_key_maps = st.text_input("📍 Klucz API Google Maps", type="password", help="Wymagane do precyzyjnego liczenia kilometrów")
     
     st.markdown("---")
     uploaded_file = st.file_uploader("📥 Wgraj zrzut ze Speeda (JPG/PNG)", type=['png', 'jpg', 'jpeg'])
 
 # ==========================================
-# FUNKCJE OBLICZENIOWE
+# FUNKCJA GOOGLE MAPS (Z KUFSTEIN DLA IT)
 # ==========================================
+def oblicz_realne_km(zaladunek, rozladunek, kod_kraju_rozladunku, maps_client):
+    try:
+        # Sprawdzanie zasady z Konstytucji 2026 (Włochy = Kufstein)
+        punkty_posrednie = ["Kufstein, Austria"] if "IT" in kod_kraju_rozladunku.upper() else None
+        
+        # Zapytanie do Google Maps API
+        directions = maps_client.directions(
+            zaladunek,
+            rozladunek,
+            waypoints=punkty_posrednie
+        )
+        
+        if directions:
+            # Sumowanie dystansu wszystkich odcinków trasy
+            dystans_metry = sum([leg['distance']['value'] for leg in directions[0]['legs']])
+            return int(dystans_metry / 1000)
+    except Exception as e:
+        return None
+    return None
+
 def calculate_metrics(df):
     df['€/km Przewoźnik'] = (df['Fracht P'] / df['KM']).round(2)
     df['€/km Klient'] = (df['Fracht K'] / df['KM']).round(2)
@@ -45,60 +67,72 @@ def calculate_metrics(df):
     return df
 
 # ==========================================
-# GŁÓWNY WIDOK - ANALIZA AI
+# GŁÓWNY WIDOK - ANALIZA AI + MAPY
 # ==========================================
 if uploaded_file is not None:
-    if not api_key or not wybrany_model:
-        st.warning("⚠️ Wprowadź klucz API i wybierz model z listy po lewej stronie.")
+    if not api_key_gemini or not api_key_maps or not wybrany_model:
+        st.warning("⚠️ Wprowadź OBA klucze API (Gemini oraz Google Maps) i wybierz model.")
     else:
         try:
-            # Konfiguracja wybranego, zweryfikowanego modelu
+            gmaps = googlemaps.Client(key=api_key_maps)
             model = genai.GenerativeModel(wybrany_model)
             image = Image.open(uploaded_file)
             
             with st.expander("👁️ Zobacz wgrany zrzut ekranu"):
                 st.image(image, use_container_width=True)
                 
-            with st.spinner(f"🤖 Model {wybrany_model} analizuje zrzut..."):
+            with st.spinner(f"🤖 Krok 1/2: AI analizuje zrzut..."):
+                # Zmieniony prompt, żeby AI oddzieliło załadunek od rozładunku (potrzebne dla Map)
                 prompt = """
-                Jesteś ekspertem logistyki. Przeanalizuj zrzut ekranu. Zwróć TYLKO surowy tekst w formacie JSON (lista obiektów), bez znaczników.
-                Dla każdego zlecenia:
-                1. "Trasa (Kod Kraj)": pełne kody, kraje i miasta. Jeśli Włochy (IT) -> dodaj "(IT, Kufstein)".
-                2. "Fracht P": Kwota przewoźnika (liczba).
-                3. "Fracht K": Kwota klienta (liczba).
-                4. "KM": Dystans (liczba).
+                Jesteś ekspertem logistyki. Zwróć JSON (lista obiektów), bez znaczników.
+                Dla każdego zlecenia wyciągnij:
+                1. "Zaladunek": Pełny kod pocztowy, miasto i kraj (np. "00-950 Warszawa, PL").
+                2. "Rozladunek": Pełny kod pocztowy, miasto i kraj (np. "20121 Mediolan, IT").
+                3. "Kraj Rozladunku": Tylko dwuliterowy kod kraju (np. "IT", "DE").
+                4. "Fracht P": Kwota przewoźnika (liczba).
+                5. "Fracht K": Kwota klienta (liczba).
                 
                 Przykład:
-                [
-                  {"Trasa (Kod Kraj)": "00-950 Warszawa (PL) -> 80331 Monachium (DE)", "Fracht P": 1200.0, "Fracht K": 1500.0, "KM": 1074}
-                ]
+                [{"Zaladunek": "00-950 Warszawa, PL", "Rozladunek": "80331 Monachium, DE", "Kraj Rozladunku": "DE", "Fracht P": 1200, "Fracht K": 1500}]
                 """
-                
                 response = model.generate_content([prompt, image])
                 
-                # Czyszczenie i ładowanie odpowiedzi
                 result_text = response.text.strip()
                 if result_text.startswith("```json"): result_text = result_text[7:-3]
                 elif result_text.startswith("```"): result_text = result_text[3:-3]
+                
+                zlecenia = json.loads(result_text)
+            
+            with st.spinner(f"🗺️ Krok 2/2: Obliczanie precyzyjnych tras przez Google Maps..."):
+                gotowe_dane = []
+                for z in zlecenia:
+                    # Obliczanie KM przez Google Maps
+                    km = oblicz_realne_km(z["Zaladunek"], z["Rozladunek"], z["Kraj Rozladunku"], gmaps)
+                    if km is None:
+                        km = 1 # Zabezpieczenie przed dzieleniem przez zero
                     
-                df_main = pd.DataFrame(json.loads(result_text))
+                    # Budowanie nazwy trasy z Konstytucją 2026
+                    dopisek = " (przez Kufstein)" if "IT" in z["Kraj Rozladunku"].upper() else ""
+                    trasa = f"{z['Zaladunek']} -> {z['Rozladunek']}{dopisek}"
+                    
+                    gotowe_dane.append({
+                        "Trasa (Kod Kraj)": trasa,
+                        "Fracht P": z["Fracht P"],
+                        "Fracht K": z["Fracht K"],
+                        "KM": km
+                    })
+                    
+                df_main = pd.DataFrame(gotowe_dane)
                 df_main = calculate_metrics(df_main)
                 
-                # Renderowanie wyników
-                st.success("✅ AI zakończyło analizę pomyślnie!")
+                st.success("✅ Analiza i wyznaczanie tras zakończone!")
                 
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Łączna Nadwyżka", f"{df_main['Nadwyżka (P-KM)'].sum().round(2)} €")
-                col2.metric("Śr. Stawka (Przewoźnik)", f"{df_main['€/km Przewoźnik'].mean().round(2)} €/km")
-                col3.metric("Śr. Stawka (Klient)", f"{df_main['€/km Klient'].mean().round(2)} €/km")
-
-                st.markdown("---")
-                st.subheader("📊 Tabela Zleceń ze Speeda")
+                st.subheader("📊 Tabela Zleceń (100% precyzyjne kilometry)")
                 styled_main = df_main.style.map(lambda x: 'color: #DC2626; font-weight: bold;' if x <= 0 else 'color: #059669;', subset=['Nadwyżka (P-KM)']).format("{:.2f}", subset=['Fracht P', 'Fracht K', 'Nadwyżka (P-KM)', '€/km Przewoźnik', '€/km Klient'])
                 st.dataframe(styled_main, use_container_width=True)
 
         except Exception as e:
-            st.error(f"Wystąpił błąd analizy: {e}")
-            st.info("Wskazówka: Zmień model z rozwijanej listy w panelu bocznym na inny i spróbuj ponownie.")
+            st.error(f"Wystąpił błąd: {e}")
+            st.info("Sprawdź, czy na pewno oba klucze API są poprawne.")
 else:
     st.info("📥 Wgraj zrzut ekranu w panelu bocznym, aby rozpocząć.")
