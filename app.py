@@ -33,7 +33,6 @@ with st.sidebar:
 # FUNKCJE OBLICZENIOWE I LOGIKA
 # ==========================================
 def calculate_metrics(df):
-    # Wyliczanie stawek za km i nadwyżki
     df['€/km Przewoźnik'] = (df['Fracht P'] / df['KM']).round(2)
     df['€/km Klient'] = (df['Fracht K'] / df['KM']).round(2)
     df['Nadwyżka (P-KM)'] = (df['Fracht K'] - df['Fracht P']).round(2)
@@ -48,49 +47,53 @@ if uploaded_file is not None:
     else:
         # Inicjalizacja AI
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-1.5-pro') 
         
-        image = Image.open(uploaded_file)
-        
-        with st.expander("👁️ Zobacz wgrany zrzut ekranu"):
-            st.image(image, use_container_width=True)
+        try:
+            # Automatyczne wykrywanie modelu dostępnego dla Twojego klucza (Kuloodporne rozwiązanie)
+            dostepne_modele = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
             
-        with st.spinner("🤖 Sztuczna inteligencja skanuje dane ze Speeda..."):
-            # Prompt wymuszający strukturę Konstytucji 2026
-            prompt = """
-            Jesteś ekspertem logistyki. Przeanalizuj ten zrzut ekranu z systemu transportowego. 
-            Zwróć TYLKO surowy tekst w formacie JSON (lista obiektów), bez znaczników markdown.
-            Dla każdego rozpoznanego zlecenia wyciągnij:
-            1. "Trasa (Kod Kraj)": pełne kody pocztowe, kraje i nazwy miast (np. "00-950 Warszawa (PL) -> 80331 Monachium (DE)"). Jeśli Włochy (IT), obowiązkowo dopisz "(IT, Kufstein)".
-            2. "Fracht P": Kwota frachtu przewoźnika (tylko liczba, bez waluty).
-            3. "Fracht K": Kwota frachtu klienta (tylko liczba).
-            4. "KM": Dystans (tylko liczba całkowita, pobierz z obrazu lub oszacuj jeśli brak).
+            wybrany_model = "gemini-1.5-flash-latest" # Opcja domyślna
+            for m in dostepne_modele:
+                if '1.5-flash' in m:
+                    wybrany_model = m.replace('models/', '')
+                    break
             
-            Przykładowy poprawny output:
-            [
-              {"Trasa (Kod Kraj)": "00-950 Warszawa (PL) -> 80331 Monachium (DE)", "Fracht P": 1200.0, "Fracht K": 1500.0, "KM": 1074}
-            ]
-            """
+            model = genai.GenerativeModel(wybrany_model)
+            image = Image.open(uploaded_file)
             
-            try:
-                # Wywołanie modelu AI
+            with st.expander("👁️ Zobacz wgrany zrzut ekranu"):
+                st.image(image, use_container_width=True)
+                
+            with st.spinner(f"🤖 Sztuczna inteligencja ({wybrany_model}) skanuje dane ze Speeda..."):
+                # Prompt wymuszający strukturę Konstytucji 2026
+                prompt = """
+                Jesteś ekspertem logistyki. Przeanalizuj ten zrzut ekranu z systemu transportowego. 
+                Zwróć TYLKO surowy tekst w formacie JSON (lista obiektów), bez znaczników markdown.
+                Dla każdego rozpoznanego zlecenia wyciągnij:
+                1. "Trasa (Kod Kraj)": pełne kody pocztowe, kraje i nazwy miast (np. "00-950 Warszawa (PL) -> 80331 Monachium (DE)"). Jeśli Włochy (IT), obowiązkowo dopisz "(IT, Kufstein)".
+                2. "Fracht P": Kwota frachtu przewoźnika (tylko liczba, bez waluty).
+                3. "Fracht K": Kwota frachtu klienta (tylko liczba).
+                4. "KM": Dystans (tylko liczba całkowita, pobierz z obrazu lub oszacuj jeśli brak).
+                
+                Przykładowy poprawny output:
+                [
+                  {"Trasa (Kod Kraj)": "00-950 Warszawa (PL) -> 80331 Monachium (DE)", "Fracht P": 1200.0, "Fracht K": 1500.0, "KM": 1074}
+                ]
+                """
+                
                 response = model.generate_content([prompt, image])
                 
-                # Czyszczenie odpowiedzi z ewentualnych znaczników
+                # Czyszczenie odpowiedzi
                 result_text = response.text.strip()
                 if result_text.startswith("```json"):
                     result_text = result_text[7:-3]
                 elif result_text.startswith("```"):
                     result_text = result_text[3:-3]
                     
-                # Przetwarzanie wyciągniętych danych na Tabelę
                 data = json.loads(result_text)
                 df_main = pd.DataFrame(data)
                 df_main = calculate_metrics(df_main)
                 
-                # ==========================================
-                # WYŚWIETLANIE WYNIKÓW PO ANALIZIE AI
-                # ==========================================
                 st.success("✅ AI zakończyło analizę!")
                 
                 st.subheader("📈 Podsumowanie Zleceń (Z tego zrzutu)")
@@ -118,8 +121,8 @@ if uploaded_file is not None:
                 else:
                     st.success("✅ Brak alertów! Wszystkie zlecenia widoczne na zrzucie generują dodatnią marżę operacyjną.")
 
-            except Exception as e:
-                st.error(f"Wystąpił błąd podczas analizy obrazu przez sztuczną inteligencję: {e}")
-                st.info("💡 Wskazówka: Upewnij się, że zrzut jest czytelny lub spróbuj wygenerować nowy klucz API.")
+        except Exception as e:
+            st.error(f"Wystąpił błąd podczas analizy obrazu przez sztuczną inteligencję: {e}")
+            st.info("💡 Wskazówka: Upewnij się, że wpisany klucz API jest poprawny.")
 else:
     st.info("📥 Aby rozpocząć prawdziwą analizę, wgraj zdjęcie lub zrzut ekranu zleceń ze Speeda w panelu bocznym.")
